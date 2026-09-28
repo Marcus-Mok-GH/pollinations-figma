@@ -1,0 +1,16 @@
+{
+  "name": "Pollinations",
+  "api": "1.0.0",
+  "main": {
+    "src": "code.js",
+    "ui": "ui.html"
+  },
+  "editorType": ["figma"],
+  "networkAccess": {
+    "allowedDomains": ["https://gen.pollinations.ai", "https://enter.pollinations.ai"],
+    "reasoning": "Generates and edits images via the Pollinations API; device-flow sign-in with approval at enter.pollinations.ai"
+  },
+  "documentAccess": {
+    "dynamic": true
+  }
+}

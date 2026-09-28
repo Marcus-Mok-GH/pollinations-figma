@@ -1,0 +1,246 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+	:root { color-scheme: light dark; }
+	body { font-family: Inter, sans-serif; margin: 0; padding: 12px; font-size: 12px; }
+	h2 { font-size: 13px; margin: 0 0 10px; }
+	.tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+	.tabs button { flex: 1; padding: 6px 0; border: 1px solid rgba(128,128,128,.4); background: transparent; border-radius: 4px; cursor: pointer; font-size: 12px; }
+	.tabs button.active { border-color: #18a0fb; color: #18a0fb; }
+	label { display: block; margin: 10px 0 4px; opacity: .8; }
+	textarea, input, select { width: 100%; box-sizing: border-box; padding: 6px; border-radius: 4px; border: 1px solid rgba(128,128,128,.4); background: transparent; color: inherit; font: inherit; }
+	textarea { height: 60px; resize: vertical; }
+	button.action { margin-top: 12px; width: 100%; padding: 8px; border: 0; border-radius: 4px; background: #18a0fb; color: #fff; font-weight: 600; cursor: pointer; }
+	button.action:disabled { opacity: .5; cursor: default; }
+	button.ghost { background: transparent; color: #18a0fb; border: 1px solid #18a0fb; }
+	.status { margin-top: 10px; min-height: 16px; opacity: .85; word-break: break-word; }
+	.muted { opacity: .6; }
+	a { color: #18a0fb; }
+	.hidden { display: none; }
+</style>
+</head>
+<body>
+	<h2>Pollinations</h2>
+	<div class="tabs">
+		<button id="tab-generate" class="active">Generate</button>
+		<button id="tab-edit">Edit</button>
+		<button id="tab-account">Account</button>
+	</div>
+
+	<div id="panel-generate">
+		<label for="model">Image model</label>
+		<select id="model"></select>
+		<label for="prompt">Prompt</label>
+		<textarea id="prompt" placeholder="Describe the image"></textarea>
+		<button id="fill" class="action" disabled>Fill selection</button>
+		<div class="status muted" id="generate-status">Select a frame or shape in the canvas.</div>
+	</div>
+
+	<div id="panel-edit" class="hidden">
+		<label for="edit-model">Edit model</label>
+		<select id="edit-model"></select>
+		<label for="edit-prompt">What should change?</label>
+		<textarea id="edit-prompt" placeholder="e.g. make it night time"></textarea>
+		<button id="edit" class="action" disabled>Edit selected image</button>
+		<div class="status muted" id="edit-status">Select the image to edit in the canvas.</div>
+	</div>
+
+	<div id="panel-account" class="hidden">
+		<label>Sign-in</label>
+		<div class="status" id="auth-status">Loading…</div>
+		<label for="app-key">Publishable App Key (device flow)</label>
+		<input id="app-key" type="password" placeholder="pk_…">
+		<button id="connect" class="action">Connect with your Pollen</button>
+		<label for="api-key">…or a development API key</label>
+		<input id="api-key" type="password" placeholder="sk_…">
+		<button id="use-api-key" class="action ghost">Use development key</button>
+		<button id="disconnect" class="action ghost hidden">Disconnect</button>
+		<div class="status muted">The token is stored in Figma client storage, never in your document. Top up at <a href="https://enter.pollinations.ai/top-up" target="_blank">enter.pollinations.ai/top-up</a>.</div>
+	</div>
+
+<script src="api.js"></script>
+<script>
+"use strict";
+const api = window.Pollinations;
+
+let token = "";
+let apiKey = "";
+let selection = [];
+let models = [];
+let editSource = null; /* {nodeId, bytes} */
+
+const el = (id) => document.getElementById(id);
+
+function transport() {
+	return async function (options) {
+		const headers = Object.assign({}, options.headers || {});
+		const res = await fetch(options.url, { method: options.method || "GET", headers: headers, body: options.body || undefined });
+		const bytes = new Uint8Array(await res.arrayBuffer());
+		return { status: res.status, text: new TextDecoder().decode(bytes), bytes: bytes };
+	};
+}
+
+function client() {
+	return new api.PollinationsClient(transport(), () => token || apiKey || "");
+}
+
+function setStatus(id, message, isError) {
+	const node = el(id);
+	node.textContent = message || "";
+	node.style.color = isError ? "#e5493d" : "";
+}
+
+function setBusy(busy, which) {
+	el("fill").disabled = busy || !selection.some(n => n.supportsFill);
+	el("edit").disabled = busy || !editSource || !el("edit-model").value;
+	["fill", "edit", "connect"].forEach(id => { if (id !== which) el(id).disabled = busy || el(id).disabled; });
+}
+
+async function loadModels() {
+	try {
+		models = await client().imageModels();
+		const modelSelect = el("model");
+		const editSelect = el("edit-model");
+		modelSelect.innerHTML = "";
+		editSelect.innerHTML = "";
+		models.forEach(m => {
+			const option = document.createElement("option");
+			option.value = m.name; option.textContent = m.name;
+			modelSelect.appendChild(option);
+			if (api.supportsImageInput(m)) {
+				const editOption = option.cloneNode(true);
+				editSelect.appendChild(editOption);
+			}
+		});
+		if (!editSelect.options.length) setStatus("edit-status", "No edit-capable models available.", true);
+		if (api.DEFAULT_IMAGE_MODEL) modelSelect.value = models.some(m => m.name === api.DEFAULT_IMAGE_MODEL) ? api.DEFAULT_IMAGE_MODEL : modelSelect.value;
+		if (api.DEFAULT_EDIT_MODEL && Array.from(editSelect.options).some(o => o.value === api.DEFAULT_EDIT_MODEL)) editSelect.value = api.DEFAULT_EDIT_MODEL;
+	} catch (error) {
+		setStatus("generate-status", String(error.message || error), true);
+	}
+}
+
+async function generateFill() {
+	const target = selection.find(n => n.supportsFill);
+	if (!target) { setStatus("generate-status", "Select a frame, rectangle, or shape first.", true); return; }
+	setBusy(true, "fill");
+	setStatus("generate-status", "Generating…");
+	try {
+		const bytes = await client().generateImage(el("prompt").value.trim(), el("model").value);
+		parent.postMessage({ pluginMessage: { type: "apply-fill", nodeId: target.id, bytes: bytes } }, "*");
+	} catch (error) {
+		setStatus("generate-status", String(error.message || error), true);
+		setBusy(false);
+	}
+}
+
+async function editSelection() {
+	if (!editSource) { setStatus("edit-status", "Select the image to edit first.", true); return; }
+	setBusy(true, "edit");
+	setStatus("edit-status", "Editing…");
+	try {
+		const bytes = await client().editImage(el("edit-prompt").value.trim(), el("edit-model").value, api.base64FromBytes(editSource.bytes));
+		parent.postMessage({ pluginMessage: { type: "apply-fill", nodeId: editSource.nodeId, bytes: bytes } }, "*");
+		setStatus("edit-status", "Edited image applied in place.");
+	} catch (error) {
+		setStatus("edit-status", String(error.message || error), true);
+	}
+	setBusy(false);
+}
+
+async function connect() {
+	const appKey = el("app-key").value.trim();
+	if (!appKey.startsWith("pk_")) { setStatus("auth-status", "An App Key starts with pk_.", true); return; }
+	setBusy(true, "connect");
+	setStatus("auth-status", "Starting sign-in…");
+	try {
+		const result = await api.deviceFlow({
+			appKey: appKey,
+			request: transport(),
+			openUrl: (url) => window.open(url, "_blank"),
+			onCode: (userCode) => setStatus("auth-status", "Your code: " + userCode + " - approve it in the browser tab that just opened.")
+		});
+		if (result.granted) {
+			token = result.accessToken;
+			parent.postMessage({ pluginMessage: { type: "store-auth", token: token, apiKey: apiKey } }, "*");
+			setStatus("auth-status", "Connected. Generation is paid with your own Pollen.");
+			await loadModels();
+		} else if (result.error === "access_denied") {
+			setStatus("auth-status", "Sign-in was denied.", true);
+		} else {
+			setStatus("auth-status", "Sign-in expired before approval. Try again.", true);
+		}
+	} catch (error) {
+		setStatus("auth-status", "Sign-in failed: " + String(error.message || error), true);
+	}
+	setBusy(false);
+}
+
+function refreshSelectionUI() {
+	const fillTarget = selection.find(n => n.supportsFill);
+	const exportTarget = selection.find(n => n.exportable);
+	if (selection.length) {
+		setStatus("generate-status", fillTarget ? "Will fill: " + fillTarget.name : "The selection does not support image fills.");
+		setStatus("edit-status", exportTarget ? "Will edit: " + exportTarget.name : "The selection cannot be exported as an image.");
+	} else {
+		setStatus("generate-status", "Select a frame or shape in the canvas.");
+		setStatus("edit-status", "Select the image to edit in the canvas.");
+	}
+	if (editSource && (!exportTarget || exportTarget.id !== editSource.nodeId)) editSource = null;
+	if (exportTarget) {
+		editSource = null;
+		parent.postMessage({ pluginMessage: { type: "request-edit-source", nodeId: exportTarget.id } }, "*");
+	}
+	el("fill").disabled = !fillTarget;
+	el("edit").disabled = !exportTarget;
+}
+
+function refreshAuthUI() {
+	const connected = Boolean(token || apiKey);
+	setStatus("auth-status", connected ? "Connected" + (apiKey && !token ? " (development key)" : "") + "." : "Not connected.");
+	el("disconnect").classList.toggle("hidden", !connected);
+}
+
+window.onmessage = function (event) {
+	const message = event.data.pluginMessage;
+	if (!message) return;
+	if (message.type === "selection") { selection = message.nodes; refreshSelectionUI(); }
+	if (message.type === "auth") { token = message.token; apiKey = message.apiKey; refreshAuthUI(); loadModels(); }
+	if (message.type === "edit-source") { editSource = { nodeId: message.nodeId, bytes: message.bytes }; el("edit").disabled = false; }
+	if (message.type === "busy") { setBusy(message.busy); }
+};
+
+el("tab-generate").onclick = () => switchTab("generate");
+el("tab-edit").onclick = () => switchTab("edit");
+el("tab-account").onclick = () => switchTab("account");
+function switchTab(name) {
+	["generate", "edit", "account"].forEach(n => {
+		el("tab-" + n).classList.toggle("active", n === name);
+		el("panel-" + n).classList.toggle("hidden", n !== name);
+	});
+}
+
+el("fill").onclick = generateFill;
+el("edit").onclick = editSelection;
+el("connect").onclick = connect;
+el("use-api-key").onclick = async function () {
+	apiKey = el("api-key").value.trim();
+	token = "";
+	parent.postMessage({ pluginMessage: { type: "store-auth", token: "", apiKey: apiKey } }, "*");
+	refreshAuthUI();
+	await loadModels();
+};
+el("disconnect").onclick = async function () {
+	token = ""; apiKey = "";
+	parent.postMessage({ pluginMessage: { type: "store-auth", token: "", apiKey: "" } }, "*");
+	refreshAuthUI();
+	await loadModels();
+};
+
+parent.postMessage({ pluginMessage: { type: "get-auth" } }, "*");
+parent.postMessage({ pluginMessage: { type: "get-selection" } }, "*");
+</script>
+</body>
+</html>
